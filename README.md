@@ -62,6 +62,15 @@ x = torch.randint(0, 256, (1, 1024))
 logits = model(x) # (1, 1024, 256)
 ```
 
+Note, if you use learned gamma, please clamp your learned weights, like this:
+
+```python
+with torch.no_grad():
+    for name, param in model.named_parameters():
+        if 'cumsum.weight_hh' in name:
+            param.clamp_(-1.0, 1.0)
+```
+
 ## Citations
 
 ```bibtex
