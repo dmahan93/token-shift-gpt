@@ -98,3 +98,13 @@ logits = model(x) # (1, 1024, 256)
     url          = {https://doi.org/10.5281/zenodo.5196578}
 }
 ```
+
+```bibtex
+@inproceedings{li2018independently,
+  title={Independently recurrent neural network (indrnn): Building A longer and deeper RNN},
+  author={Li, Shuai and Li, Wanqing and Cook, Chris and Zhu, Ce and Gao, Yanbo},
+  booktitle={Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition},
+  pages={5457--5466},
+  year={2018}
+}
+```
