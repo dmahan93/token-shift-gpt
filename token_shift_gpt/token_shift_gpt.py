@@ -2,7 +2,7 @@ from math import log2, ceil
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
-
+from .cuda_indrnn import IndRNN_onlyrecurrent as indRNN
 from einops import rearrange
 
 # helper functions
@@ -35,18 +35,6 @@ def shift_tokens(x, amt, eps = 1e-5):
 
     return torch.cat((*shifts, x_pass), dim = -1)
 
-def discounted_cumsum(t, gamma):
-    try:
-        from torch_discounted_cumsum import discounted_cumsum_left
-    except ImportError:
-        print('unable to import torch_discounted_cumsum - please run `pip install torch-discounted-cumsum`')
-
-    b, n, d = t.shape
-    t = rearrange(t, 'b n d -> (b d) n')
-    t = discounted_cumsum_left(t, gamma)
-    t = rearrange(t, '(b d) n -> b n d', b = b)
-    return t
-
 # helper classes
 
 class Residual(nn.Module):
@@ -67,6 +55,8 @@ class FeedForward(nn.Module):
         mult = 4,
         eps = 1e-3,
         use_discounted_cumsum = False,
+        use_discounted_cumdif = False,
+        use_learned_cumsum = False,
         discount_gamma = 0.9
     ):
         super().__init__()
@@ -97,7 +87,18 @@ class FeedForward(nn.Module):
         # for using discounted cumsum approach
 
         self.use_discounted_cumsum = use_discounted_cumsum
+        self.use_discounted_cumdif = use_discounted_cumdif
+        self.use_learned_cumsum = use_learned_cumsum
         self.discount_gamma = discount_gamma
+        if use_discounted_cumdif and use_discounted_cumsum:
+            self.cumsum_d = indRNN(dim*mult//4)
+            self.cumsum_s = indRNN(dim*mult//4)
+        elif use_discounted_cumdif:
+            self.cumsum_d = indRNN(dim*mult//2)
+        elif use_discounted_cumsum:
+            self.cumsum_s = indRNN(dim*mult//2)
+        elif use_learned_cumsum:
+            self.cumsum = indRNN(dim*mult//2)
 
     def forward(self, x):
         x = self.norm(x)
@@ -107,10 +108,31 @@ class FeedForward(nn.Module):
         x, gate = x.chunk(2, dim = -1)
 
         gate = self.gate_norm(gate)
-
-        if self.use_discounted_cumsum:
+        if self.use_learned_cumsum:
+            gate = shift(gate, 1, dim=-2)
+            gate = rearrange(gate, 'b n d -> n b d')
+            gate = self.cumsum(gate, None)
+            gate = rearrange(gate, 'n b d -> b n d')
+        elif self.use_discounted_cumdif and self.use_discounted_cumsum:
+            gate_s, gate_d = gate.chunk(2, dim=-1)
+            gate_s = shift(gate_s, 1, dim=-2)
+            gate_s = rearrange(gate_s, 'b n d -> n b d')
+            gate_d = shift(gate_d, 1, dim=-2)
+            gate_d = rearrange(gate_d, 'b n d -> n b d')
+            gate_s = self.cumsum_s(gate_s, self.discount_gamma)
+            gate_d = self.cumsum_d(gate_d, -self.discount_gamma)
+            gate = torch.cat([gate_s, gate_d], dim=-1)
+            gate = rearrange(gate, 'n b d -> b n d')
+        elif self.use_discounted_cumdif:
+            gate = shift(gate, 1, dim=-2)
+            gate = rearrange(gate, 'b n d -> n b d')
+            gate = self.cumsum_d(gate, -self.discount_gamma)
+            gate = rearrange(gate, 'n b d -> b n d')
+        elif self.use_discounted_cumsum:
             gate = shift(gate, 1, dim = -2)
-            gate = discounted_cumsum(gate, self.discount_gamma)
+            gate = rearrange(gate, 'b n d -> n b d')
+            gate = self.cumsum_s(gate, self.discount_gamma)
+            gate = rearrange(gate, 'n b d -> b n d')
         else:
             gate = shift_tokens(gate, self.num_shifts)
 
@@ -129,6 +151,8 @@ class TokenShiftGPT(nn.Module):
         depth,
         ff_mult = 4,
         use_discounted_cumsum = False,
+        use_discounted_cumdif = False,
+        use_learned_cumsum = False,
         discount_gamma = 0.9
     ):
         super().__init__()
@@ -139,7 +163,14 @@ class TokenShiftGPT(nn.Module):
         self.pos_emb = nn.Embedding(max_seq_len, dim)
 
         self.net = nn.Sequential(
-            *[Residual(FeedForward(dim = dim, num_shifts = num_shifts, mult = ff_mult, max_seq_len = max_seq_len, use_discounted_cumsum = use_discounted_cumsum, discount_gamma = discount_gamma)) for _ in range(depth)],
+            *[Residual(FeedForward(dim = dim,
+                                   num_shifts = num_shifts,
+                                   mult = ff_mult,
+                                   max_seq_len = max_seq_len,
+                                   use_discounted_cumsum = use_discounted_cumsum,
+                                   use_discounted_cumdif=use_discounted_cumdif,
+                                   use_learned_cumsum=use_learned_cumsum,
+                                   discount_gamma = discount_gamma)) for _ in range(depth)],
             nn.LayerNorm(dim),
             nn.Linear(dim, num_tokens)
         )
